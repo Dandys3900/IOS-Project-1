@@ -1,0 +1,11 @@
+--- mole.odevzdany	2023-04-23 10:10:13.018221449 +0200
++++ mole	2023-04-23 10:51:46.167454232 +0200
+@@ -63,7 +63,7 @@
+ }
+ # Function for adding entry to log file, with path to it defined in $MOLE_RC
+ function saveFileData () {
+-    filePath="$1"
++    filePath=$(realpath "$1")
+     # Make log entry: path_to_file YYYY-MM-DD HH-MM-SS group_which_opened_the_file
+     # Default for group is '-' if $ARG_GROUP is not defined
+     echo "$filePath $(date +'%Y-%m-%d %H-%M-%S') $([ -z "${ARG_GROUP}" ] && echo "-" || echo "$ARG_GROUP")" >> "$MOLE_RC"

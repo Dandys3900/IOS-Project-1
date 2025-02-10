@@ -1,0 +1,322 @@
+#!/bin/bash
+
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+
+# Function that prints HELP text to stdout
+function getHelp () {
+  echo "# ------------------------------------------------------------------------------ HELP ------------------------------------------------------------------------------ #
+        # mole -ARGS                                                                                                                                                         #
+        #   -> ARGS:                                                                                                                                                         #
+        #       -h - Prints help for using the script.                                                                                                                       #
+        #       mole [-g GROUP] FILE - The specified file will be opened.                                                                                                    #
+        #       mole [-m] [FILTERS] [DIRECTORY] - If DIRECTORY corresponds to an existing directory, the script will select the file to be opened from that directory.       #
+        #           -> If no directory was specified, the current directory is assumed.                                                                                      #
+        #           -> If multiple files have been edited by the script in the given directory, the file that was opened (edited) last by the script is selected.            #
+        #           -> If the -m argument was given, the script will select the file that was opened (edited) most often by the script.                                      #
+        #       mole list [FILTERS] [DIRECTORY] - The script displays a list of files that have been opened (edited) by the script in the given directory.                   #
+        #           -> If no directory was specified, the current directory is assumed.                                                                                      #
+        #           -> If the groups are specified using the -g switch, only files and groups with records belonging to those groups will be listed.                         #
+        #           -> If a file does not belong to any group, only the - character will be listed instead of the group list.                                                #
+        #       FILTERS:                                                                                                                                                     #
+        #           -> -a ... File records before the specified date in YYYY-MM-DD format will be ignored                                                                    #
+        #           -> -b ... Records of files after the specified date in YYYY-MM-DD format will be ignored                                                                 #
+        # ------------------------------------------------------------------------------------------------------------------------------------------------------------------ #" >&1
+}
+# Function for checking if the given file as argument $1, exists in the system, if so, open it, otherwise do nothing.
+function checkIfFileOnGivenPathExists () {
+    # Get absolute path to given file
+    input=$(realpath "$1")
+    # Check if file exists
+    if [ -f "$input" ]; then
+        openFile "$1"
+    fi
+}
+# Function for printing error message given as argument $1 to stderr and exit execution with error status 1
+function outputError () {
+    echo "$1" >&2
+    exit 1
+}
+# Function for checking if needed system utilities are installed on host machine
+# Function takes various arguments and it iterates through each and checks if installed by calling 'which package_name' and checking return value
+function checkIfNeededPackagesAreInstalled () {
+    # Iterate through given arguments
+    for arg in "$@"; do
+        # Check if installed on system
+        output=$(which "$arg")
+        if [ -z "${output}" ]; then
+            # If not, output error and exit
+            outputError "Needed package $arg is not installed"
+        fi
+    done
+}
+# Function for setting editor for opening file
+# If none of variables below are defined, default value is to use vi editor
+function getEditorForOpening () {
+    if [ -n "${EDITOR}" ]; then
+        retValue="$EDITOR"
+    elif [ -n "${VISUAL}" ]; then
+        retValue="$VISUAL"
+    else
+        retValue='vi'
+    fi
+}
+# Function for adding entry to log file, with path to it defined in $MOLE_RC
+function saveFileData () {
+    filePath=$(realpath "$1")
+    # Make log entry: path_to_file YYYY-MM-DD HH-MM-SS group_which_opened_the_file
+    # Default for group is '-' if $ARG_GROUP is not defined
+    echo "$filePath $(date +'%Y-%m-%d %H-%M-%S') $([ -z "${ARG_GROUP}" ] && echo "-" || echo "$ARG_GROUP")" >> "$MOLE_RC"
+}
+# Function for performing open file process
+# Function get which editor use to open defined in $retValue and then opens the file given as argument
+# If no error while opening the file by defined editor, make log entry, otherwise output error and exit
+function openFile () {
+    checkCommandArg
+    # Get which editor to use for opening file $1
+    getEditorForOpening
+    $retValue "$1" && saveFileData "$1" || outputError "Error when trying to open file"
+    exit 0
+}
+# Function making the main functionalities of this script
+# Function makes command, depending on which functionality is needed as which command line arguments were provided
+function createTerminalCommand () {
+    # If secret-log functionality is requested
+    if [ "$1" = "secretLog" ]; then
+        # Check if not empty string containing all directories, which should be included in secret-log, is provided
+        if [ -z "${functionArg}" ]; then
+            # If not defined -> all directories in log file will be included
+            finalCommand='cat $MOLE_RC'
+        else
+            joinedDirs=$(echo "${functionArg}" | sed "s/ /\/\[\^\/\]\*\$|/g")
+            finalCommand='grep -E "^('$joinedDirs'/[^/]*$)" $MOLE_RC'
+            # Current value of $finalCommand=grep -E ^($functionArg_0/[^/]*$|$functionArg_1/[^/]*$) $MOLE_RC
+            # Every directory in $functioanlArg, given from command line, and separated by white space will be concanated by "|" and at end of each "[^/]*$" will be added to ensure files directly from this directory will be selected
+        fi
+    else
+        finalCommand='grep -w '\^$directory\/\[\^\/\]\*\$' $MOLE_RC'
+        # Current value of $finalCommand=grep -w ^$directory/[^/]*$ $MOLE_RC
+        # Selects only log entries starting with $directory and again secures to only select log entries exactly from this directory
+    fi
+    # Command line argument specifying groups were provided -> filter and select only entries from this directory and opened by given group(s)
+    if [ -n "${ARG_GROUP}" ]; then
+        # -g argument cant be used in combination with secret-log functionality
+        if [ "$1" = "secretLog" ]; then
+            outputError "Error -g cant be used with secret-log option"
+        fi
+        # Changes provided groups, f.e group1,group2 to group1$|group2$| and use it for grep selection
+        finalCommand+=' | grep -E `echo '${ARG_GROUP}' |sed "s/,/$|/g;s/$/$/"`'
+    fi
+    # Command line argument for date restriction was provided -> select only entries AFTER given date
+    if [ -n "${ARG_A}" ]; then
+        finalCommand+=' | awk -v search_date="${ARG_A}" '"'\$2 > search_date { print }'"''
+    fi
+    # Command line argument for date restriction was provided -> select only entries BEFORE given date
+    if [ -n "${ARG_B}" ]; then
+        finalCommand+=' | awk -v search_date="${ARG_B}" '"'\$2 < search_date { print }'"''
+    fi
+    # Check if -m argument was provided
+    if [ "$1" = "checkMOpt" ]; then
+        if [ -n "${ARG_M}" ]; then
+            # -m argument given -> select most open file, sort first column (containing file names) by the usage -> remove duplicit entries -> get file names only
+            finalCommand+=' | awk '"'{ print \$1 }'"' | sort | uniq -c | sort -nr | awk '"'{ print \$2 }'"''
+        else
+            # Otherwise select most recent file -> output file names and reverse order to get the latest one
+            finalCommand+=' | awk '"'{ print \$1 }'"' | tac'
+        fi
+        # Set ORS (output record separator) to " "
+        finalCommand+=' | awk -v ORS='"' '"' '"'{print \$1}'"''
+    # Case for list functionality
+    elif [ "$1" = "sortOutput" ]; then
+        # sort -k 4 | awk '{
+        #     sub(/.*\//, "", $1);
+        #     if (!(($1 ":" $NF) in seen)) {
+        #         if ($NF == "-") {
+        #             arr[$1] = arr[$1]
+        #         }
+        #         else {
+        #             arr[$1] = arr[$1]","$NF
+        #         }
+        #         seen[$1 ":" $NF] = 1
+        #     }
+        # }
+        # END {
+        #     for (i in arr) {
+        #         subPrint=substr(arr[i], 2);
+        #         if (subPrint == "") {
+        #             subPrint="-"
+        #         }
+        #         printf "%s: %s\n", i, subPrint
+        #     }
+        # }' $MOLE_RC | sort | column -t
+        finalCommand+=' | sort -k 4 | awk '"'{sub(/.*\//, \"\", \$1); if (!((\$1 \":\" \$NF) in seen)) {if (\$NF == \"-\") {arr[\$1] = arr[\$1]} else {arr[\$1] = arr[\$1]\",\"\$NF} seen[\$1 \":\" \$NF] = 1}} END {for (i in arr) {subPrint=substr(arr[i], 2); if (subPrint == \"\") {subPrint=\"-\"} printf \"%s: %s\n\", i, subPrint}}'"' | sort -d -f | column -t'
+    # Case for making secret-log output
+    elif [ "$1" = "secretLog" ]; then
+        # awk '{
+        #     if (!(($1 ":" $2"_"$3) in seen)) {
+        #         arr[$1] = arr[$1] ";" $2"_"$3;
+        #         seen[$1 ":" $2"_"$3] = 1
+        #     }
+        # }
+        # END {
+        #     for (i in arr) {
+        #         printf "%s;%s\n", i, substr(arr[i], 2)
+        #     }
+        # }' $MOLE_RC | sort -d -f
+        finalCommand+=' | awk '"'{if (!((\$1 \":\" \$2\"_\"\$3) in seen)) {arr[\$1] = arr[\$1] \";\" \$2\"_\"\$3; seen[\$1 \":\" \$2\"_\"\$3] = 1}} END {for (i in arr) {printf \"%s;%s\n\", i, substr(arr[i], 2)}}'"' | sort -d -f'
+    else
+        # Default case
+        finalCommand+=' | tail -1 | awk '"'{ print \$1 }'"''
+    fi
+}
+# Function for checking if number of unprocessed command line arguments doesnt exceed 2, if so, throw an error and exit
+function checkCommandArg () {
+    if [[ $commandArg -gt 1 ]]; then
+        outputError "Error, leftovers in command arguments found"
+    fi
+}
+# Function for lost function
+function outputList () {
+    # Security check
+    checkCommandArg
+    # Make custom terminal command for list case
+    createTerminalCommand "sortOutput"
+    # Process command and output result, otherwise throw an error and exit
+    eval "$finalCommand" || outputError "Error when trying to output list"
+    exit 0
+}
+# Function for selecting most recent/most opened file in given directory
+function openDirectory () {
+    # Security check
+    checkCommandArg
+    # Make terminal command
+    createTerminalCommand "checkMOpt"
+    # Execute made command and store output
+    fileToBeOpened=$(eval "$finalCommand")
+    # Make array named values
+    declare -a values=()
+    # Parse command output to array, each record is separated by white space
+    read -ra values <<< "$fileToBeOpened"
+    # Iterate through array and try to open file in current array index, if success, open the file and succesfully exit, otherwise move to next index and try again
+    for value in "${values[@]}"; do
+        checkIfFileOnGivenPathExists "$value"
+    done
+    # If we reach this point, every file in array is deleted or array is empty -> output error and exit
+    outputError "Error while trying to open directory file"
+}
+# Function for secret-log function
+function makeSecretLog () {
+    # Store all directories for which make secret-log
+    functionArg="$@"
+    # Make terminal command for this case
+    createTerminalCommand "secretLog"
+    # Make folder for storing secret-log in home directory
+    if ! [ -d "$HOME/.mole" ]; then
+        mkdir -p "$HOME"/.mole
+    fi
+    # Compose file name log_CURRENT_USER_DATETIME.bz2
+    fileName="log"_$(whoami)_$(date +'%Y-%m-%d_%H-%M-%S')
+    # Store terminal output
+    fileContent=$(eval "$finalCommand")
+    # Determine path to new secret log
+    secretLogPath="$HOME"/.mole/"$fileName"
+    # Make file and print there terminal command output -> compress the file using bzip2
+    touch "$secretLogPath" && echo "$fileContent" > "$secretLogPath" || outputError "Error when making secret log" >> "$secretLogPath" && bzip2 "$secretLogPath"
+    exit 0
+}
+# Function to check if at the script startup, the $MOLE_RC is defined, if not, output error and exit
+function checkMOLE_RCIsSet () {
+    if [ -z "${MOLE_RC}" ]; then
+        outputError "Variable \$MOLE_RC is unset"
+    fi
+}
+# Function for ensuring values after -a/-b match requested date format: YYYY-MM-DD, otherwise throw error and exit
+function checkDateArgumentFormat () {
+    if ! echo "$1" | grep -Eq "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"; then
+        outputError "Invalid date argument provided"
+    fi
+}
+# Function for checking if this command line argument wasnt already entered
+function checkArgDuplicity () {
+    if [ -n "$1" ]; then
+        # Given argument already entered -> output error and exit
+        outputError "Argument already provided"
+    fi
+}
+# Function for setting $directory variable depending on provided command line arguments
+function setDirectory () {
+    # All arguments are already processed -> stay in current directory
+    if [ $1 -eq 0 ]; then
+        directory=$(realpath ./)
+    else
+        # Set directory to first unprocessed argument
+        directory="$2"
+        # If directory, we can use realpath to get full path
+        if [ -d "$2" ]; then
+            directory=$(realpath "$2")
+        fi
+    fi
+}
+
+# Check if $MOLE_RC is defined
+checkMOLE_RCIsSet
+# Create file to store log entries
+mkdir -p "$(dirname "$MOLE_RC")" && touch "$MOLE_RC"
+# Check if needed package are installed on host machine
+checkIfNeededPackagesAreInstalled awk date grep realpath sort uniq column tail tac dirname touch
+# Get total number of command line arguments
+commandArg=$#
+############### PARSING PROCESS ###############
+if [[ -n "${1}" && "${1}" != -* && $commandArg -ge 1 ]]; then
+    # Check first argument and according to its value, set variables and further proceed
+    if [[ "$1" = "list" ]]; then
+        callListOutput='True'
+        ((commandArg--))
+        shift
+    elif [[ "$1" = "secret-log" ]]; then
+        callSecretOutput='True'
+        ((commandArg--))
+        shift
+    elif [[ $commandArg -eq 1 ]]; then
+        openFile "$1"
+    else
+        outputError "Error while parsing command line arguments"
+    fi
+fi
+# Parse -* arguments using getopts
+while getopts hg:ma:b: option; do
+    case $option in
+        h) getHelp; exit 0;; # Output help text and exit
+        g) checkArgDuplicity "$ARG_GROUP"; ARG_GROUP="$OPTARG"; ((commandArg-=2));; # Store which groups should be the log file filtered for
+        m) ARG_M='True'; ((commandArg--));; # Indicate we need to search for most opened file and open it
+        a) checkArgDuplicity "$ARG_A"; checkDateArgumentFormat "$OPTARG"; ARG_A="$OPTARG"; ((commandArg-=2));; # Store date, which before values will be ignored in output
+        b) checkArgDuplicity "$ARG_B"; checkDateArgumentFormat "$OPTARG"; ARG_B="$OPTARG"; ((commandArg-=2));; # Store date, which after values will be ignored in output
+        *) outputError "Invalid argument provided";; # Invalid -* argument given, output error and exit
+    esac
+done
+
+shift $((OPTIND-1))
+# Set $directory
+setDirectory "$commandArg" "${!commandArg}"
+
+# Call functions matching requested action
+if [[ -n $callListOutput ]]; then
+    # Call list function
+    outputList
+elif [[ -n $callSecretOutput ]]; then
+    # Call function for making secret log
+    makeSecretLog "$@"
+# Case for one unprocessed argument
+elif [[ $commandArg -eq 1 ]]; then
+    if [ -d "${!commandArg}" ]; then
+        openDirectory
+    else
+        openFile "${!commandArg}"
+    fi
+# Select and open last opened file from current directory
+elif [[ $commandArg -eq 0 ]]; then
+    openDirectory
+# Otherwise throw and error and exit
+else
+    outputError "Error while parsing command line arguments"
+fi
